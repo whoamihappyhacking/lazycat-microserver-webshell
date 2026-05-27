@@ -3991,6 +3991,89 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     };
   };
 
+  const requestTerminalRender = (term) => {
+    if (!term || term.isDisposed || !term.isOpen || !term.renderer || !term.wasmTerm) {
+      return;
+    }
+    if (term.webshellRenderFrame) {
+      return;
+    }
+    term.webshellRenderFrame = window.requestAnimationFrame(() => {
+      term.webshellRenderFrame = 0;
+      if (!term.isDisposed && term.isOpen && term.renderer && term.wasmTerm) {
+        term.renderer.render(term.wasmTerm, false, term.viewportY || 0, term, term.scrollbarOpacity || 0);
+        const cursor = term.wasmTerm.getCursor?.();
+        if (cursor && cursor.y !== term.lastCursorY) {
+          term.lastCursorY = cursor.y;
+          term.cursorMoveEmitter?.fire?.();
+        }
+      }
+    });
+  };
+
+  const installTerminalDemandRenderPatch = (session) => {
+    const term = session?.term;
+    if (!term || term.webshellDemandRenderPatchInstalled) {
+      return;
+    }
+    term.webshellDemandRenderPatchInstalled = true;
+    if (term.animationFrameId) {
+      window.cancelAnimationFrame(term.animationFrameId);
+      term.animationFrameId = void 0;
+    }
+    term.startRenderLoop = () => requestTerminalRender(term);
+    term.requestRender = () => requestTerminalRender(term);
+    if (term.selectionManager) {
+      term.selectionManager.requestRender = () => requestTerminalRender(term);
+    }
+
+    if (typeof term.write === "function") {
+      term.webshellDemandRenderOriginalWrite = term.write.bind(term);
+      term.write = (...args) => {
+        const result = term.webshellDemandRenderOriginalWrite(...args);
+        requestTerminalRender(term);
+        return result;
+      };
+    }
+    if (typeof term.animateScroll === "function") {
+      term.webshellDemandRenderOriginalAnimateScroll = term.animateScroll.bind(term);
+      term.animateScroll = (...args) => {
+        const result = term.webshellDemandRenderOriginalAnimateScroll(...args);
+        requestTerminalRender(term);
+        return result;
+      };
+    }
+    for (const method of ["scrollLines", "scrollPages", "scrollToTop", "scrollToBottom", "scrollToLine"]) {
+      if (typeof term[method] !== "function") {
+        continue;
+      }
+      const original = term[method].bind(term);
+      term[`webshellDemandRenderOriginal${method}`] = original;
+      term[method] = (...args) => {
+        const result = original(...args);
+        requestTerminalRender(term);
+        return result;
+      };
+    }
+    if (typeof term.resize === "function") {
+      term.webshellDemandRenderOriginalResize = term.resize.bind(term);
+      term.resize = (...args) => {
+        const result = term.webshellDemandRenderOriginalResize(...args);
+        requestTerminalRender(term);
+        return result;
+      };
+    }
+    if (typeof term.reset === "function") {
+      term.webshellDemandRenderOriginalReset = term.reset.bind(term);
+      term.reset = (...args) => {
+        const result = term.webshellDemandRenderOriginalReset(...args);
+        requestTerminalRender(term);
+        return result;
+      };
+    }
+    requestTerminalRender(term);
+  };
+
   const terminalViewportValue = (value) => {
     const number = Number(value || 0);
     return Number.isFinite(number) ? number : 0;
@@ -10937,6 +11020,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       term.options.mobilePixelScroll = mobilePixelScrollEnabled && isMobileLayout();
     }
     term.open(terminalHost);
+    installTerminalDemandRenderPatch({ term });
     const compositionPreview = document.createElement("span");
     compositionPreview.className = "terminal-composition-preview";
     compositionPreview.hidden = true;
@@ -11008,6 +11092,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     installTerminalInputFocus(session);
     installTerminalKeyOverrides(session);
     installTerminalHostViewportGuard(session);
+    installTerminalDemandRenderPatch(session);
     installTerminalBottomScrollbarPatch(session);
     installRendererBaselinePatch(session);
     installRendererThemeMapper(session);
