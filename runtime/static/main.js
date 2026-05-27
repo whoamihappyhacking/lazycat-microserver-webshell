@@ -227,6 +227,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   const terminalOutputFlushFallbackMs = 32;
   const performanceMeterSampleMs = 500;
   const performanceMeterWarmupFrames = 12;
+  const performanceMeterTargetIntervalMax = 240;
+  const performanceMeterTargetIntervalMinCount = 45;
+  const performanceMeterTargetRefreshRates = [24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 180, 200, 240, 300, 360];
   const terminalPixelScrollOffsetEpsilon = 0.001;
   const maxQueuedTerminalOutputBytes = 4 * 1024 * 1024;
   const activityPollIntervalMs = 4000;
@@ -637,6 +640,33 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   };
   const terminalOptions = (overrides = {}) => ({ ...terminalOptionsBase, fontSize: terminalFontSize, theme: cloneTheme(activeTheme), ...overrides });
 
+  const estimateTargetRefreshRate = (intervals) => {
+    const valid = intervals
+      .filter((interval) => Number.isFinite(interval) && interval >= 2 && interval <= 100)
+      .slice()
+      .sort((left, right) => left - right);
+    if (valid.length < performanceMeterTargetIntervalMinCount) {
+      return 0;
+    }
+    const fastIndex = Math.min(valid.length - 1, Math.max(0, Math.floor(valid.length * 0.1)));
+    const fastInterval = valid[fastIndex];
+    if (!fastInterval) {
+      return 0;
+    }
+    const rawHz = 1000 / fastInterval;
+    let closest = performanceMeterTargetRefreshRates[0];
+    let closestDistance = Math.abs(rawHz - closest);
+    for (const rate of performanceMeterTargetRefreshRates) {
+      const distance = Math.abs(rawHz - rate);
+      if (distance < closestDistance) {
+        closest = rate;
+        closestDistance = distance;
+      }
+    }
+    const tolerance = Math.max(2, closest * 0.08);
+    return closestDistance <= tolerance ? closest : Math.round(rawHz);
+  };
+
   const startPerformanceMeter = () => {
     if (!performanceMeterFps || !performanceMeterRefresh) {
       return;
@@ -648,7 +678,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     let lastTime = 0;
     let rafID = 0;
     const frameIntervals = [];
-    const maxIntervals = 90;
+    let targetRefresh = 0;
     const update = (time) => {
       if (disposed) {
         return;
@@ -658,7 +688,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         const interval = time - lastTime;
         if (interval > 0 && interval < 1000) {
           frameIntervals.push(interval);
-          if (frameIntervals.length > maxIntervals) {
+          if (frameIntervals.length > performanceMeterTargetIntervalMax) {
             frameIntervals.shift();
           }
         }
@@ -677,11 +707,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       const elapsed = time - sampleStart;
       if (elapsed >= performanceMeterSampleMs) {
         const fps = Math.round((sampleFrames * 1000) / elapsed);
-        const intervals = frameIntervals.slice().sort((left, right) => left - right);
-        const median = intervals.length > 0 ? intervals[Math.floor(intervals.length / 2)] : 0;
-        const refresh = median > 0 ? Math.round(1000 / median) : 0;
+        targetRefresh = estimateTargetRefreshRate(frameIntervals) || targetRefresh;
         performanceMeterFps.textContent = `${fps} FPS`;
-        performanceMeterRefresh.textContent = refresh > 0 ? `${refresh} Hz` : "-- Hz";
+        performanceMeterRefresh.textContent = targetRefresh > 0 ? `${targetRefresh} Hz` : "-- Hz";
         sampleStart = time;
         sampleFrames = 0;
       }
