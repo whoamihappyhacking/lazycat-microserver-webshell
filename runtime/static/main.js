@@ -432,6 +432,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
   let mobilePixelScrollEnabled = true;
   let mobileDoubleTapReminderEnabled = true;
   let performanceMeterEnabled = window.localStorage.getItem(performanceMeterStorageKey) === "true";
+  let performanceMeterFrame = 0;
   let fontEditMode = false;
   const selectedFontDeleteIDs = new Set();
   const registeredFontFaces = new Map();
@@ -672,15 +673,18 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     applyPerformanceMeterVisibility();
+    if (!performanceMeterEnabled || performanceMeterFrame) {
+      return;
+    }
     let frameCount = 0;
     let sampleFrames = 0;
     let sampleStart = 0;
     let lastTime = 0;
-    let rafID = 0;
     const frameIntervals = [];
     let targetRefresh = 0;
     const update = (time) => {
-      if (disposed) {
+      if (disposed || !performanceMeterEnabled) {
+        performanceMeterFrame = 0;
         return;
       }
       frameCount += 1;
@@ -697,7 +701,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       if (frameCount <= performanceMeterWarmupFrames) {
         sampleStart = time;
         sampleFrames = 0;
-        rafID = window.requestAnimationFrame(update);
+        performanceMeterFrame = window.requestAnimationFrame(update);
         return;
       }
       if (!sampleStart) {
@@ -713,10 +717,15 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
         sampleStart = time;
         sampleFrames = 0;
       }
-      rafID = window.requestAnimationFrame(update);
+      performanceMeterFrame = window.requestAnimationFrame(update);
     };
-    rafID = window.requestAnimationFrame(update);
-    window.addEventListener("beforeunload", () => window.cancelAnimationFrame(rafID), { once: true });
+    performanceMeterFrame = window.requestAnimationFrame(update);
+    window.addEventListener("beforeunload", () => {
+      if (performanceMeterFrame) {
+        window.cancelAnimationFrame(performanceMeterFrame);
+        performanceMeterFrame = 0;
+      }
+    }, { once: true });
   };
 
   const selectStoredTheme = () => {
@@ -1012,6 +1021,10 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     const meter = performanceMeterFps?.closest?.(".performance-meter");
     if (meter) {
       meter.hidden = !performanceMeterEnabled;
+    }
+    if (!performanceMeterEnabled && performanceMeterFrame) {
+      window.cancelAnimationFrame(performanceMeterFrame);
+      performanceMeterFrame = 0;
     }
   };
 
@@ -4380,10 +4393,39 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
       return;
     }
     renderer.webshellCellSeamPatchInstalled = true;
+    if (typeof renderer.render === "function") {
+      renderer.webshellOriginalRender = renderer.render.bind(renderer);
+      renderer.render = (wasmTerm, force, viewportY = 0, terminal, ...args) => {
+        if (terminalIsPixelScrollRender(Number(viewportY) % 1)) {
+          const patchedRenderLine = renderer.renderLine;
+          const patchedRenderCellBackground = renderer.renderCellBackground;
+          const patchedRenderCellText = renderer.renderCellText;
+          renderer.webshellPixelScrollRendering = true;
+          try {
+            if (renderer.webshellOriginalRenderLine) {
+              renderer.renderLine = renderer.webshellOriginalRenderLine;
+            }
+            if (renderer.webshellOriginalRenderCellBackground) {
+              renderer.renderCellBackground = renderer.webshellOriginalRenderCellBackground;
+            }
+            if (renderer.webshellOriginalRenderCellText) {
+              renderer.renderCellText = renderer.webshellOriginalRenderCellText;
+            }
+            return renderer.webshellOriginalRender(wasmTerm, force, viewportY, terminal, ...args);
+          } finally {
+            renderer.renderLine = patchedRenderLine;
+            renderer.renderCellBackground = patchedRenderCellBackground;
+            renderer.renderCellText = patchedRenderCellText;
+            renderer.webshellPixelScrollRendering = false;
+          }
+        }
+        return renderer.webshellOriginalRender(wasmTerm, force, viewportY, terminal, ...args);
+      };
+    }
     renderer.webshellOriginalRenderCellBackground = renderer.renderCellBackground.bind(renderer);
     renderer.renderCellBackground = (cell, column, row, offsetY = 0) => {
       renderer.webshellOriginalRenderCellBackground(cell, column, row, offsetY);
-      if (terminalIsPixelScrollRender(offsetY)) {
+      if (renderer.webshellPixelScrollRendering || terminalIsPixelScrollRender(offsetY)) {
         return;
       }
       const metrics = renderer.metrics || renderer.getMetrics?.();
@@ -4433,7 +4475,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (typeof renderer.renderCellText === "function") {
       renderer.webshellOriginalRenderCellText = renderer.renderCellText.bind(renderer);
       renderer.renderCellText = (cell, column, row, offsetY = 0) => {
-        if (terminalIsPixelScrollRender(offsetY)) {
+        if (renderer.webshellPixelScrollRendering || terminalIsPixelScrollRender(offsetY)) {
           renderer.webshellOriginalRenderCellText(cell, column, row, offsetY);
           return;
         }
@@ -4449,7 +4491,7 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     if (typeof renderer.renderLine === "function") {
       renderer.webshellOriginalRenderLine = renderer.renderLine.bind(renderer);
       renderer.renderLine = (line, row, columns, offsetY = 0) => {
-        if (terminalIsPixelScrollRender(offsetY)) {
+        if (renderer.webshellPixelScrollRendering || terminalIsPixelScrollRender(offsetY)) {
           const patchedRenderCellBackground = renderer.renderCellBackground;
           const patchedRenderCellText = renderer.renderCellText;
           renderer.renderCellBackground = renderer.webshellOriginalRenderCellBackground || patchedRenderCellBackground;
@@ -13306,6 +13348,9 @@ document.body?.classList.toggle("is-embed-mode", isEmbedMode);
     window.localStorage.setItem(performanceMeterStorageKey, performanceMeterEnabled ? "true" : "false");
     applyPerformanceMeterVisibility();
     syncSettingsPerformanceMeterToggle();
+    if (performanceMeterEnabled) {
+      startPerformanceMeter();
+    }
   });
   settingsMobilePixelScrollToggle?.addEventListener("change", () => {
     const previous = mobilePixelScrollEnabled;
